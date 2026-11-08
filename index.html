@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Jungle Ranger — Run, Jump, Shoot Through 12 Jungle Levels</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;overflow:hidden;background:#0d2b16;font-family:Verdana,Arial,sans-serif}
+  #wrap{position:relative;width:100%;height:100%;max-width:1100px;margin:0 auto}
+  canvas{display:block;width:100%;height:100%;background:#7ec8e3;touch-action:none}
+  .btn{cursor:pointer;border:0;border-radius:10px;padding:12px 26px;font-size:18px;font-weight:bold;color:#fff;background:#2e8b3a;box-shadow:0 4px 0 #1c5a24}
+  .btn:active{transform:translateY(3px);box-shadow:none}
+  .btn.orange{background:#e07b1f;box-shadow:0 4px 0 #9a5410}
+  .btn.small{padding:8px 14px;font-size:14px}
+  #muteBtn{position:absolute;top:10px;right:10px;z-index:20}
+  #touch{position:absolute;left:0;right:0;bottom:8px;display:none;justify-content:space-between;padding:0 10px;z-index:15;pointer-events:none}
+  #touch .grp{display:flex;gap:10px;pointer-events:auto}
+  .tbtn{width:62px;height:62px;border-radius:50%;border:2px solid rgba(255,255,255,.7);background:rgba(0,0,0,.45);color:#fff;font-size:22px;font-weight:bold;touch-action:none;user-select:none;-webkit-user-select:none}
+  .tbtn:active{background:rgba(255,255,255,.4)}
+  @media (pointer:coarse){#touch{display:flex}}
+  @media (max-width:700px){#touch{display:flex}}
+</style>
+<script>
+  // ---- GameMonetize SDK (official loader, from ~/workspace/gamemonetize/templates) ----
+  // SDK_OPTIONS MUST be defined BEFORE the SDK script loads.
+  // gameId is a PLACEHOLDER: replace "[YOUR GM GAME ID HERE]" with the real
+  // 32-char gameId from the GameMonetize control panel before uploading.
+  // The game plays fully with the SDK guarded/absent (see gm bridge below).
+  window.SDK_OPTIONS = {
+    gameId: "[YOUR GM GAME ID HERE]",
+    onEvent: function (event) {
+      var h = window.__gmEventHandler;
+      if (typeof h === "function") h(event);
+      else (window.__gmEventQueue = window.__gmEventQueue || []).push(event);
+    }
+  };
+</script>
+<script>
+  (function (a, b, c) {
+    var d = a.getElementsByTagName(b)[0];
+    a.getElementById(c) || (a = a.createElement(b), a.id = c, a.src = "https://api.gamemonetize.com/sdk.js", d.parentNode.insertBefore(a, d))
+  })(document, "script", "gamemonetize-sdk");
+</script>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+  <button id="muteBtn" class="btn small" title="Mute / unmute sound">🔊 Sound: ON</button>
+  <div id="touch">
+    <div class="grp"><button class="tbtn" id="tLeft">◀</button><button class="tbtn" id="tRight">▶</button></div>
+    <div class="grp"><button class="tbtn" id="tJump">▲</button><button class="tbtn" id="tShoot">●</button></div>
+  </div>
+</div>
+<script>
+'use strict';
+/* =====================================================================
+   JUNGLE RANGER — original run-and-gun platform adventure.
+   12 levels, distinct enemy creature per level, 3 boss levels (4/8/12),
+   progress saved in localStorage, synthesized WebAudio (no audio files),
+   original PIL-drawn PNG art (background.png, player.png, enemy.png,
+   enemy2.png ... enemy12.png, coin.png, heart.png) in this same folder.
+   GameMonetize SDK: showBanner() ONLY on the PLAY button press, never on
+   load. SDK_GAME_PAUSE pauses+mutes, SDK_GAME_START resumes+unmutes.
+   ===================================================================== */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = 960, H = 540;
+
+/* ---------------- GameMonetize bridge (live availability, per CONVERSION-PLAN §3) ---------------- */
+function gmSdk() {
+  const s = window.sdk;
+  return (s && typeof s.showBanner === 'function') ? s : null;
+}
+const GM = {
+  preRollShown: false, adInFlight: false, adTimer: null, pausedByGM: false, mutedByGM: false,
+  get available() { return gmSdk() !== null; },   // LIVE getter — re-checked on every read, never snapshotted
+  showBanner() {
+    const live = gmSdk();                          // re-check immediately before the call
+    if (!live || this.adInFlight) return false;
+    this.adInFlight = true;
+    try { live.showBanner(); this.adTimer = setTimeout(() => { this.adInFlight = false; }, 60000); }
+    catch (e) { this.adInFlight = false; }
+    return true;
+  },
+  onPause() { // SDK_GAME_PAUSE: pause + mute (mandatory — never audible during an ad)
+    try {
+      if (state === 'playing' && !paused) { paused = true; this.pausedByGM = true; }
+      else if (!AudioSys.muted) { AudioSys.setPausedMute(true); this.mutedByGM = true; }
+    } catch (e) {}
+  },
+  onResume() { // SDK_GAME_START: resume + unmute exactly what we paused/muted
+    try {
+      this.adInFlight = false; if (this.adTimer) { clearTimeout(this.adTimer); this.adTimer = null; }
+      if (this.pausedByGM) { paused = false; this.pausedByGM = false; }
+      else if (this.mutedByGM) { AudioSys.setPausedMute(false); this.mutedByGM = false; }
+    } catch (e) { this.pausedByGM = false; this.mutedByGM = false; }
+  }
+};
+function gmHandleEvent(ev) {
+  if (!ev || typeof ev.name !== 'string') return;
+  if (ev.name === 'SDK_GAME_PAUSE') GM.onPause();
+  else if (ev.name === 'SDK_GAME_START') GM.onResume();
+  // SDK_READY: availability is a live getter, nothing to store.
+}
+(function drainGMQueue() {
+  const q = window.__gmEventQueue || []; window.__gmEventQueue = [];
+  q.forEach(gmHandleEvent); window.__gmEventHandler = gmHandleEvent;
+})();
+window.__gamemonetize = {
+  get available() { return GM.available; },
+  get preRollShown() { return GM.preRollShown; },
+  get pausedByGM() { return GM.pausedByGM; },
+  simulatePause: () => GM.onPause(), simulateResume: () => GM.onResume()
+};
+
+/* ---------------- Audio: synthesized WebAudio (jungle ambient + all SFX) ---------------- */
+const AudioSys = {
+  ctx: null, master: null, muted: localStorage.getItem('jr_muted') === '1',
+  adMuted: false, ambientTimer: null, started: false,
+  init() {
+    if (this.ctx) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.5;
+      this.master.connect(this.ctx.destination);
+      this.startAmbient();
+    } catch (e) { /* audio unavailable — game still plays */ }
+  },
+  resume() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  setMuted(m) { this.muted = m; localStorage.setItem('jr_muted', m ? '1' : '0'); if (this.master) this.master.gain.value = (m || this.adMuted) ? 0 : 0.5; updateMuteBtn(); },
+  setPausedMute(m) { this.adMuted = m; if (this.master) this.master.gain.value = (m || this.muted) ? 0 : 0.5; },
+  tone(freq, dur, type, vol, slideTo) {
+    if (!this.ctx || this.muted || this.adMuted) return;
+    try {
+      const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+      o.type = type || 'square'; o.frequency.setValueAtTime(freq, this.ctx.currentTime);
+      if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, this.ctx.currentTime + dur);
+      g.gain.setValueAtTime(vol || 0.2, this.ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + dur);
+      o.connect(g); g.connect(this.master); o.start(); o.stop(this.ctx.currentTime + dur);
+    } catch (e) {}
+  },
+  noise(dur, vol, freq) {
+    if (!this.ctx || this.muted || this.adMuted) return;
+    try {
+      const len = this.ctx.sampleRate * dur, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      const src = this.ctx.createBufferSource(); src.buffer = buf;
+      const f = this.ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = freq || 800;
+      const g = this.ctx.createGain(); g.gain.value = vol || 0.25;
+      src.connect(f); f.connect(g); g.connect(this.master); src.start();
+    } catch (e) {}
+  },
+  shoot() { this.tone(720, 0.12, 'square', 0.16, 240); },
+  enemyShoot() { this.tone(300, 0.18, 'sawtooth', 0.12, 140); },
+  jump() { this.tone(280, 0.18, 'sine', 0.22, 620); },
+  destroy() { this.noise(0.25, 0.3, 900); this.tone(180, 0.25, 'triangle', 0.2, 60); },
+  coin() { this.tone(990, 0.08, 'sine', 0.2); setTimeout(() => this.tone(1320, 0.14, 'sine', 0.2), 70); },
+  hurt() { this.tone(200, 0.3, 'sawtooth', 0.25, 70); },
+  win() { [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => this.tone(f, 0.25, 'triangle', 0.25), i * 140)); },
+  lose() { [400, 340, 280, 180].forEach((f, i) => setTimeout(() => this.tone(f, 0.3, 'sawtooth', 0.2), i * 160)); },
+  startAmbient() {
+    if (this.started) return; this.started = true;
+    // Jungle ambience: soft filtered-noise wind bed + random bird chirps.
+    const chirp = () => {
+      if (!this.muted && !this.adMuted && state === 'playing') {
+        const base = 1800 + Math.random() * 1400;
+        this.tone(base, 0.09, 'sine', 0.07, base * 1.4);
+        setTimeout(() => this.tone(base * 1.2, 0.07, 'sine', 0.05, base * 0.8), 120);
+      }
+      this.ambientTimer = setTimeout(chirp, 1800 + Math.random() * 3200);
+    };
+    this.ambientTimer = setTimeout(chirp, 1200);
+  }
+};
+function updateMuteBtn() {
+  document.getElementById('muteBtn').textContent = AudioSys.muted ? '🔇 Sound: OFF' : '🔊 Sound: ON';
+}
+document.getElementById('muteBtn').addEventListener('click', () => { AudioSys.init(); AudioSys.setMuted(!AudioSys.muted); });
+
+/* ---------------- Images (single folder, per blog: enemy.png … enemy12.png) ---------------- */
+const IMG = {};
+const IMG_FILES = ['background.png', 'player.png', 'coin.png', 'heart.png',
+  'enemy.png', 'enemy2.png', 'enemy3.png', 'enemy4.png', 'enemy5.png', 'enemy6.png',
+  'enemy7.png', 'enemy8.png', 'enemy9.png', 'enemy10.png', 'enemy11.png', 'enemy12.png'];
+let imagesLoaded = 0, imagesFailed = [];
+IMG_FILES.forEach(f => {
+  const im = new Image();
+  im.onload = () => { imagesLoaded++; };
+  im.onerror = () => { imagesFailed.push(f); };
+  im.src = f; IMG[f] = im;
+});
+
+/* ---------------- Save (localStorage — progress survives reload) ---------------- */
+const SAVE_KEY = 'jungleRangerSaveV1';
+let save = { unlocked: 1, stars: {}, coins: 0, score: 0, levelsDone: 0 };
+try {
+  const raw = localStorage.getItem(SAVE_KEY);
+  if (raw) { const p = JSON.parse(raw); if (p && typeof p.unlocked === 'number') save = Object.assign(save, p); }
+} catch (e) {}
+function persistSave() { try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) {} }
+
+/* ---------------- Level definitions: 12 levels, different enemy per level ---------------- */
+const ENEMY_NAMES = { 1: 'Snake', 2: 'Monkey', 3: 'Spider', 4: 'Crimson Serpent (BOSS)', 5: 'Bat', 6: 'Scorpion', 7: 'Frog', 8: 'Gorilla King (BOSS)', 9: 'Beetle', 10: 'Crocodile', 11: 'Parrot', 12: 'Jaguar Lord (BOSS)' };
+const LEVELS = [
+  { n: 1, name: 'Snake Meadow',    enemy: 1,  count: 6,  len: 2600, boss: false, hp: 2, speed: 45 },
+  { n: 2, name: 'Monkey Canopy',   enemy: 2,  count: 8,  len: 3000, boss: false, hp: 2, speed: 70 },
+  { n: 3, name: 'Spider Hollow',   enemy: 3,  count: 10, len: 3200, boss: false, hp: 3, speed: 80 },
+  { n: 4, name: 'Crimson Serpent', enemy: 4,  count: 4,  len: 3000, boss: true,  hp: 30, speed: 60 },
+  { n: 5, name: 'Bat Caves',       enemy: 5,  count: 12, len: 3400, boss: false, hp: 2, speed: 95, fly: true },
+  { n: 6, name: 'Scorpion Sands',  enemy: 6,  count: 13, len: 3600, boss: false, hp: 3, speed: 85 },
+  { n: 7, name: 'Frog Lagoon',     enemy: 7,  count: 14, len: 3800, boss: false, hp: 3, speed: 90, hop: true },
+  { n: 8, name: 'Gorilla King',    enemy: 8,  count: 6,  len: 3600, boss: true,  hp: 40, speed: 70 },
+  { n: 9, name: 'Beetle Ruins',    enemy: 9,  count: 16, len: 4000, boss: false, hp: 4, speed: 75 },
+  { n: 10, name: 'Crocodile River',enemy: 10, count: 18, len: 4200, boss: false, hp: 4, speed: 95 },
+  { n: 11, name: 'Parrot Peaks',   enemy: 11, count: 20, len: 4400, boss: false, hp: 3, speed: 110, fly: true },
+  { n: 12, name: 'Jaguar Lord',    enemy: 12, count: 8,  len: 4800, boss: true,  hp: 50, speed: 110 },
+];
+// Playtime estimate: L1 ~3 min, rising ~1 min/level to ~8 min on L12 (long levels,
+// 6–20 enemies + boss fights) => 12 levels ≈ 65–75 min total. See README.
+
+/* ---------------- Game state ---------------- */
+let state = 'menu';            // menu | loading | select | playing | complete | gameover | victory
+let paused = false;
+let level = null, levelNum = 1, camX = 0, score = 0, levelCoins = 0, levelCoinsTotal = 0;
+let deathsThisLevel = 0, levelTime = 0, loadingT = 0, loadingTarget = 'select';
+let player, enemies, bullets, ebullets, coins, platforms, flagX, boss = null;
+let particles = [];
+const keys = {};
+const GRAV = 1500;
+
+function buildLevel(n) {
+  const def = LEVELS[n - 1];
+  levelNum = n; level = def;
+  const L = def.len;
+  player = { x: 60, y: H - 140, vx: 0, vy: 0, w: 44, h: 62, onGround: false, face: 1, hearts: 3, invuln: 0, shootCd: 0, dead: false };
+  enemies = []; bullets = []; ebullets = []; coins = []; particles = []; camX = 0;
+  score = save.score; levelCoins = 0; deathsThisLevel = 0; levelTime = 0;
+  // Platforms: ground is continuous (y=470); floating wood platforms above.
+  platforms = [{ x: 0, y: 470, w: L + 400, h: 70 }];
+  let px = 350;
+  while (px < L - 300) {
+    const pw = 110 + Math.random() * 90, py = 300 + Math.random() * 130;
+    platforms.push({ x: px, y: py, w: pw, h: 18 });
+    px += pw + 180 + Math.random() * 160;
+  }
+  // Enemies spread along the level (never within 250px of spawn).
+  // On boss levels the regular enemies are MINIONS (a weaker creature with
+  // normal HP) — only the boss itself uses the boss sprite and boss HP.
+  const MINION = { 4: { img: 'enemy.png', hp: 2, fly: false }, 8: { img: 'enemy2.png', hp: 2, fly: false }, 12: { img: 'enemy11.png', hp: 3, fly: true } };
+  const minion = def.boss ? MINION[def.enemy] : null;
+  const enemyImg = def.enemy === 1 ? 'enemy.png' : 'enemy' + def.enemy + '.png';
+  for (let i = 0; i < def.count; i++) {
+    const ex = 420 + (i + Math.random() * 0.7) * ((L - 700) / def.count);
+    const fly = minion ? minion.fly : !!def.fly;
+    const hp = minion ? minion.hp : def.hp;
+    const img = minion ? minion.img : enemyImg;
+    enemies.push({ x: ex, y: fly ? 180 + Math.random() * 120 : 470 - 56, vx: 0, vy: 0, w: def.boss ? 52 : 52, h: def.boss ? 52 : 52,
+      hp, maxHp: hp, speed: def.speed * (0.85 + Math.random() * 0.3), dir: Math.random() < 0.5 ? -1 : 1,
+      shootCd: 1 + Math.random() * 2, t: Math.random() * 10, fly, hop: !!def.hop, img, boss: false, baseY: fly ? 180 + Math.random() * 120 : 0 });
+  }
+  if (def.boss) {
+    const bx = L - 620;
+    boss = { x: bx, y: 470 - 130, vx: 0, vy: 0, w: 130, h: 130, hp: def.hp, maxHp: def.hp, speed: def.speed,
+      dir: -1, shootCd: 2, t: 0, fly: false, hop: false, img: enemyImg, boss: true, baseY: 0, summonCd: 9 };
+    enemies.push(boss);
+  } else boss = null;
+  // Coins: arcs above platforms + a trail along the ground.
+  for (let i = 0; i < 26 + n * 2; i++) {
+    const cx = 300 + i * ((L - 600) / (26 + n * 2));
+    coins.push({ x: cx, y: (i % 3 === 0) ? 250 + Math.random() * 80 : 420, taken: false, t: Math.random() * 6 });
+  }
+  flagX = L - 140;
+  levelCoinsTotal = coins.length;
+}
+
+function startLevel(n) {
+  AudioSys.init(); AudioSys.resume();
+  buildLevel(n);
+  state = 'playing'; paused = false;
+}
+
+/* ---------------- Input ---------------- */
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'].includes(e.code)) e.preventDefault();
+  if (e.code === 'KeyM') AudioSys.setMuted(!AudioSys.muted);
+  if (e.code === 'KeyP' && state === 'playing') paused = !paused;
+  if (e.code === 'Enter' && (state === 'menu')) onPlayPressed();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('mousedown', () => { if (state === 'playing' && !paused) shoot(); });
+function bindTouch(id, down, up) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); AudioSys.init(); down(); };
+  const off = e => { e.preventDefault(); if (up) up(); };
+  el.addEventListener('touchstart', on, { passive: false }); el.addEventListener('touchend', off, { passive: false });
+  el.addEventListener('mousedown', on); el.addEventListener('mouseup', off);
+}
+bindTouch('tLeft', () => keys.ArrowLeft = true, () => keys.ArrowLeft = false);
+bindTouch('tRight', () => keys.ArrowRight = true, () => keys.ArrowRight = false);
+bindTouch('tJump', () => { keys.Space = true; setTimeout(() => keys.Space = false, 150); });
+bindTouch('tShoot', () => shoot());
+
+/* ---------------- Combat / actions ---------------- */
+function shoot() {
+  if (state !== 'playing' || paused || !player || player.dead || player.shootCd > 0) return;
+  player.shootCd = 0.28;
+  bullets.push({ x: player.x + player.w / 2 + player.face * 24, y: player.y + 22, vx: player.face * 620, vy: 0, r: 6 });
+  AudioSys.shoot();
+}
+function hurtPlayer(dmg) {
+  if (!player || player.invuln > 0 || player.dead) return;
+  player.hearts -= dmg; player.invuln = 1.6; AudioSys.hurt();
+  player.vy = -320; // knockback hop
+  if (player.hearts <= 0) {
+    player.dead = true; deathsThisLevel++;
+    AudioSys.lose();
+    setTimeout(() => { if (state === 'playing') { state = 'gameover'; } }, 900);
+  }
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < (n || 12); i++) particles.push({ x, y, vx: (Math.random() - 0.5) * 320, vy: -Math.random() * 260, life: 0.6, color });
+}
+function completeLevel() {
+  if (state !== 'playing') return;
+  const coinPct = levelCoinsTotal ? levelCoins / levelCoinsTotal : 0;
+  const stars = (deathsThisLevel === 0 && coinPct >= 0.7) ? 3 : (coinPct >= 0.4 ? 2 : 1);
+  save.stars[levelNum] = Math.max(save.stars[levelNum] || 0, stars);
+  save.unlocked = Math.max(save.unlocked, Math.min(12, levelNum + 1));
+  save.levelsDone = Math.max(save.levelsDone, levelNum);
+  save.score = score; save.coins += levelCoins;
+  persistSave();
+  AudioSys.win();
+  state = (levelNum === 12) ? 'victory' : 'complete';
+}
+
+/* ---------------- Update ---------------- */
+function rectsOverlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+function update(dt) {
+  if (state !== 'playing' || paused) return;
+  levelTime += dt;
+  const p = player;
+  p.shootCd = Math.max(0, p.shootCd - dt); p.invuln = Math.max(0, p.invuln - dt);
+  const left = keys.ArrowLeft || keys.KeyA, right = keys.ArrowRight || keys.KeyD;
+  const jump = keys.Space || keys.ArrowUp || keys.KeyW;
+  if (left) { p.vx = -260; p.face = -1; } else if (right) { p.vx = 260; p.face = 1; } else p.vx = 0;
+  if (jump && p.onGround) { p.vy = -620; p.onGround = false; AudioSys.jump(); }
+  if ((keys.KeyJ || keys.KeyX || keys.KeyK) && p.shootCd <= 0) shoot();
+  p.vy += GRAV * dt;
+  p.x += p.vx * dt; p.y += p.vy * dt;
+  p.x = Math.max(0, Math.min(level.len + 200, p.x));
+  // Platform collision
+  p.onGround = false;
+  for (const pl of platforms) {
+    if (p.x + p.w > pl.x && p.x < pl.x + pl.w && p.y + p.h >= pl.y && p.y + p.h <= pl.y + 26 && p.vy >= 0) {
+      p.y = pl.y - p.h; p.vy = 0; p.onGround = true;
+    }
+  }
+  if (p.y > H + 80) { // fell off the world: lose a heart, respawn at last safe spot
+    p.y = H - 200; p.x = Math.max(60, p.x - 260); p.vy = 0; hurtPlayer(1); p.invuln = 1.6;
+  }
+  camX = Math.max(0, Math.min(level.len + 200 - W, p.x + p.w / 2 - W * 0.42));
+  // Player bullets
+  for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  bullets = bullets.filter(b => b.x > camX - 50 && b.x < camX + W + 50);
+  // Enemies: patrol / fly / hop, shoot at the player, contact damage
+  for (const e of enemies) {
+    e.t += dt;
+    const dx = (p.x + p.w / 2) - (e.x + e.w / 2), dy = (p.y + p.h / 2) - (e.y + e.h / 2);
+    const dist = Math.hypot(dx, dy);
+    if (e.fly) {
+      e.x += Math.sin(e.t * 1.4) * 40 * dt; e.y = e.baseY + Math.sin(e.t * 2) * 36;
+      if (dist < 460) e.x += (dx > 0 ? 26 : -26) * dt;
+    } else if (e.hop) {
+      e.x += e.dir * e.speed * dt;
+      if (Math.random() < dt * 0.7 && Math.abs(p.y - e.y) < 200) e.y -= 4; // hop wiggle (ground clamp below)
+      if (e.x < 200 || e.x > level.len - 100) e.dir *= -1;
+      if (Math.random() < dt * 0.4) e.dir = dx > 0 ? 1 : -1;
+    } else {
+      e.x += e.dir * e.speed * dt;
+      if (e.x < 200 || e.x > level.len - 100) e.dir *= -1;
+      if (Math.random() < dt * 0.25) e.dir = dx > 0 ? 1 : -1;
+    }
+    if (!e.fly) e.y = 470 - e.h;
+    // ENEMIES SHOOT at the player when in range (early levels shoot slower — Level 1 must be easy)
+    e.shootCd -= dt;
+    if (e.shootCd <= 0 && dist < 460 && !p.dead) {
+      e.shootCd = e.boss ? 1.1 : (2.0 + Math.max(0, 4 - levelNum) * 0.5) + Math.random() * 1.2;
+      const ang = Math.atan2(dy, dx);
+      const shots = e.boss ? [-0.22, 0, 0.22] : [0]; // boss fires a 3-way spread
+      const spd = 240 + levelNum * 8;
+      for (const off of shots) {
+        ebullets.push({ x: e.x + e.w / 2, y: e.y + e.h / 2, vx: Math.cos(ang + off) * spd, vy: Math.sin(ang + off) * spd, r: 7, boss: !!e.boss });
+      }
+      AudioSys.enemyShoot();
+    }
+    // Boss summons minions
+    if (e.boss) {
+      e.summonCd -= dt;
+      if (e.summonCd <= 0 && enemies.length < 14) {
+        e.summonCd = 10;
+        const mImg = level.enemy === 4 ? 'enemy.png' : (level.enemy === 8 ? 'enemy2.png' : 'enemy11.png');
+        enemies.push({ x: e.x - 120, y: 470 - 52, vx: 0, vy: 0, w: 52, h: 52, hp: 2, maxHp: 2, speed: 80, dir: 1, shootCd: 2, t: 0, fly: false, hop: false, img: mImg, boss: false, baseY: 0 });
+      }
+    }
+    if (!p.dead && rectsOverlap(p, e)) hurtPlayer(1);
+  }
+  // Enemy bullets
+  for (const b of ebullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+  ebullets = ebullets.filter(b => b.x > camX - 80 && b.x < camX + W + 80 && b.y > -40 && b.y < H + 40);
+  for (const b of ebullets) {
+    if (!p.dead && Math.hypot(b.x - (p.x + p.w / 2), b.y - (p.y + p.h / 2)) < b.r + 20) { hurtPlayer(1); b.x = -9999; }
+  }
+  ebullets = ebullets.filter(b => b.x > -100);
+  // Player bullets vs enemies
+  for (const b of bullets) {
+    for (const e of enemies) {
+      if (e.hp > 0 && b.x > e.x - 6 && b.x < e.x + e.w + 6 && b.y > e.y - 6 && b.y < e.y + e.h + 6) {
+        e.hp -= 1; b.x = -9999; burst(b.x, b.y, '#ffd23f', 8);
+        if (e.hp <= 0) { burst(e.x + e.w / 2, e.y + e.h / 2, '#ff7b2f', 18); score += e.boss ? 500 : 100; AudioSys.destroy(); }
+        break;
+      }
+    }
+  }
+  bullets = bullets.filter(b => b.x > -100);
+  enemies = enemies.filter(e => e.hp > 0);
+  if (boss && boss.hp <= 0) boss = null;
+  // Coins
+  for (const c of coins) {
+    c.t += dt;
+    if (!c.taken && Math.hypot(c.x - (p.x + p.w / 2), c.y + Math.sin(c.t * 3) * 4 - (p.y + p.h / 2)) < 34) {
+      c.taken = true; levelCoins++; score += 25; AudioSys.coin(); burst(c.x, c.y, '#ffd23f', 6);
+    }
+  }
+  // Flag / goal — on boss levels the flag opens only after the boss is beaten
+  const bossAlive = level.boss && enemies.some(e => e.boss);
+  if (!bossAlive && p.x + p.w >= flagX) completeLevel();
+  // Particles
+  for (const pt of particles) { pt.x += pt.vx * dt; pt.y += pt.vy * dt; pt.vy += 600 * dt; pt.life -= dt; }
+  particles = particles.filter(pt => pt.life > 0);
+}
+
+/* ---------------- Draw ---------------- */
+function drawImg(im, x, y, w, h) { if (im && im.complete && im.naturalWidth) ctx.drawImage(im, x, y, w, h); }
+function roundRect(x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  if (state === 'menu') return drawMenu();
+  if (state === 'loading') return drawLoading();
+  if (state === 'select') return drawSelect();
+  // --- in-game / end screens share the world render ---
+  drawImg(IMG['background.png'], 0, 0, W, H);
+  if (!level) return;
+  ctx.save(); ctx.translate(-camX, 0);
+  for (const pl of platforms) {
+    if (pl.y >= 470) continue; // ground is part of the background art
+    ctx.fillStyle = '#8a5a2b'; ctx.fillRect(pl.x, pl.y, pl.w, pl.h);
+    ctx.fillStyle = '#3f9e4d'; ctx.fillRect(pl.x, pl.y, pl.w, 7);
+    ctx.fillStyle = '#6b4423'; ctx.fillRect(pl.x + 6, pl.y + 7, 4, pl.h - 7); ctx.fillRect(pl.x + pl.w - 10, pl.y + 7, 4, pl.h - 7);
+  }
+  // Flag
+  const bossAlive = level.boss && enemies.some(e => e.boss);
+  ctx.fillStyle = '#7a5230'; ctx.fillRect(flagX, 470 - 120, 8, 120);
+  ctx.fillStyle = bossAlive ? '#888' : '#ffd23f';
+  ctx.beginPath(); ctx.moveTo(flagX + 8, 470 - 120); ctx.lineTo(flagX + 62, 470 - 104); ctx.lineTo(flagX + 8, 470 - 88); ctx.closePath(); ctx.fill();
+  if (bossAlive) { ctx.fillStyle = '#fff'; ctx.font = 'bold 13px Verdana'; ctx.fillText('BEAT THE BOSS!', flagX - 40, 470 - 130); }
+  for (const c of coins) if (!c.taken) drawImg(IMG['coin.png'], c.x - 14, c.y + Math.sin(c.t * 3) * 4 - 14, 28, 28);
+  for (const e of enemies) {
+    drawImg(IMG[e.img], e.x, e.y, e.w, e.h);
+    if (e.maxHp > 4) { // boss HP bar
+      ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(e.x - 6, e.y - 18, e.w + 12, 10);
+      ctx.fillStyle = '#e33'; ctx.fillRect(e.x - 5, e.y - 17, (e.w + 10) * Math.max(0, e.hp / e.maxHp), 8);
+    }
+  }
+  for (const b of bullets) { ctx.fillStyle = '#ffe14d'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill(); ctx.fillStyle = '#e07b1f'; ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, 7); ctx.fill(); }
+  for (const b of ebullets) { ctx.fillStyle = b.boss ? '#ff3b6b' : '#b45cff'; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill(); ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(b.x, b.y, 3, 0, 7); ctx.fill(); }
+  for (const pt of particles) { ctx.globalAlpha = Math.max(0, pt.life / 0.6); ctx.fillStyle = pt.color; ctx.fillRect(pt.x - 3, pt.y - 3, 6, 6); }
+  ctx.globalAlpha = 1;
+  if (player && !player.dead) {
+    if (player.invuln > 0 && Math.floor(player.invuln * 12) % 2 === 0) ctx.globalAlpha = 0.35;
+    ctx.save();
+    if (player.face === -1) { ctx.translate(player.x + player.w, player.y); ctx.scale(-1, 1); ctx.drawImage(IMG['player.png'], 0, 0, 64, 64); }
+    else drawImg(IMG['player.png'], player.x - 8, player.y - 2, 64, 64);
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+  // HUD: hearts, coins, score, level
+  for (let i = 0; i < 3; i++) {
+    ctx.globalAlpha = i < player.hearts ? 1 : 0.25;
+    drawImg(IMG['heart.png'], 14 + i * 36, 12, 30, 30);
+  }
+  ctx.globalAlpha = 1;
+  drawImg(IMG['coin.png'], 130, 14, 26, 26);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 18px Verdana'; ctx.textAlign = 'left';
+  ctx.fillText('x ' + levelCoins, 160, 34);
+  ctx.fillText('Score ' + score, 250, 34);
+  ctx.fillText('Level ' + levelNum + ' — ' + level.name, 430, 34);
+  ctx.fillText('⏱ ' + Math.floor(levelTime / 60) + ':' + String(Math.floor(levelTime % 60)).padStart(2, '0'), 800, 34);
+  if (paused) {
+    ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 44px Verdana'; ctx.textAlign = 'center';
+    ctx.fillText('⏸ PAUSED', W / 2, H / 2 - 10);
+    ctx.font = '18px Verdana'; ctx.fillText('Press P to resume  •  M to mute', W / 2, H / 2 + 30);
+  }
+  if (state === 'complete') drawEndPanel('LEVEL COMPLETE!', '#2e8b3a', 'Next Level', () => startLevel(Math.min(12, levelNum + 1)));
+  if (state === 'gameover') drawEndPanel('GAME OVER', '#b03030', 'Retry Level', () => startLevel(levelNum));
+  if (state === 'victory') drawEndPanel('🏆 YOU BEAT THE JUNGLE!', '#2e8b3a', 'Play Again (Level 1)', () => startLevel(1));
+}
+let endBtn = null;
+function drawEndPanel(title, color, btnLabel, onClick) {
+  ctx.fillStyle = 'rgba(0,0,0,.62)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = color; roundRect(W / 2 - 260, 120, 520, 260, 18); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.font = 'bold 34px Verdana';
+  ctx.fillText(title, W / 2, 180);
+  ctx.font = '19px Verdana';
+  const coinPct = levelCoinsTotal ? Math.round(100 * levelCoins / levelCoinsTotal) : 0;
+  ctx.fillText('Coins ' + levelCoins + '/' + levelCoinsTotal + ' (' + coinPct + '%)   •   Score ' + score, W / 2, 225);
+  ctx.fillText('Time ' + Math.floor(levelTime / 60) + ':' + String(Math.floor(levelTime % 60)).padStart(2, '0') + '   •   Deaths ' + deathsThisLevel, W / 2, 255);
+  ctx.fillText('★'.repeat(save.stars[levelNum] || 1) + '☆'.repeat(3 - (save.stars[levelNum] || 1)), W / 2, 290);
+  endBtn = { x: W / 2 - 110, y: 310, w: 220, h: 48, onClick };
+  ctx.fillStyle = '#ffd23f'; roundRect(endBtn.x, endBtn.y, endBtn.w, endBtn.h, 10); ctx.fill();
+  ctx.fillStyle = '#333'; ctx.font = 'bold 19px Verdana'; ctx.fillText(btnLabel, W / 2, endBtn.y + 31);
+  ctx.fillStyle = '#fff'; ctx.font = '15px Verdana'; ctx.fillText('Click Level Select to pick another level', W / 2, 400);
+}
+function drawMenu() {
+  drawImg(IMG['background.png'], 0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd23f'; ctx.font = 'bold 64px Verdana';
+  ctx.fillText('🌿 JUNGLE RANGER', W / 2, 110);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 22px Verdana';
+  ctx.fillText('Run • Jump • Shoot through 12 jungle levels!', W / 2, 150);
+  // PLAY button in the center
+  ctx.fillStyle = '#2e8b3a'; roundRect(W / 2 - 130, 200, 260, 70, 14); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 32px Verdana'; ctx.fillText('▶  PLAY', W / 2, 246);
+  window.__playBtn = { x: W / 2 - 130, y: 200, w: 260, h: 70 };
+  // Controls + How to Play on the first menu
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; roundRect(120, 300, 720, 150, 14); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 19px Verdana'; ctx.fillText('HOW TO PLAY', W / 2, 330);
+  ctx.font = '16px Verdana'; ctx.textAlign = 'left';
+  const lines = [
+    'Move: ← → or A / D      Jump: Space / ↑ / W      Shoot: J / X or click',
+    'Touch: on-screen ◀ ▶ ▲ ● buttons work on phones and tablets.',
+    'Collect coins, dodge enemy shots, reach the flag. Bosses on levels 4, 8, 12.',
+    'You have 3 hearts ❤❤❤. Progress, stars and coins are saved in your browser.',
+  ];
+  lines.forEach((l, i) => ctx.fillText(l, 150, 358 + i * 24));
+  ctx.textAlign = 'center'; ctx.font = '14px Verdana'; ctx.fillStyle = '#ddd';
+  ctx.fillText('An original game — all art drawn for this game. No ads on load; one ad plays when you press PLAY.', W / 2, 480);
+  ctx.fillText('Progress saved: level ' + save.unlocked + ' unlocked  •  ' + save.coins + ' coins banked', W / 2, 505);
+}
+function drawLoading() {
+  drawImg(IMG['background.png'], 0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 36px Verdana';
+  ctx.fillText('LOADING…', W / 2, 230);
+  const pct = Math.min(1, loadingT / 3);
+  ctx.fillStyle = '#333'; roundRect(W / 2 - 220, 260, 440, 28, 14); ctx.fill();
+  ctx.fillStyle = '#2e8b3a'; roundRect(W / 2 - 220, 260, 440 * pct, 28, 14); ctx.fill();
+  ctx.font = '18px Verdana'; ctx.fillText(Math.round(pct * 100) + '% — sharpening machetes…', W / 2, 320);
+}
+function drawSelect() {
+  drawImg(IMG['background.png'], 0, 0, W, H);
+  ctx.fillStyle = 'rgba(0,0,0,.45)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#fff'; ctx.font = 'bold 36px Verdana';
+  ctx.fillText('CHOOSE A LEVEL', W / 2, 70);
+  ctx.font = '16px Verdana'; ctx.fillText('Your progress is saved — reload and you continue here.', W / 2, 98);
+  window.__levelBtns = [];
+  LEVELS.forEach((lv, i) => {
+    const col = i % 4, row = Math.floor(i / 4);
+    const x = 90 + col * 205, y = 130 + row * 120, w = 185, h = 100;
+    const unlocked = lv.n <= save.unlocked;
+    ctx.fillStyle = unlocked ? (lv.boss ? '#7a2e8b' : '#2e8b3a') : '#555';
+    roundRect(x, y, w, h, 12); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 17px Verdana';
+    ctx.fillText((unlocked ? '' : '🔒 ') + lv.n + '. ' + lv.name, x + w / 2, y + 30);
+    ctx.font = '14px Verdana';
+    ctx.fillText(ENEMY_NAMES[lv.enemy], x + w / 2, y + 55);
+    ctx.fillText('★'.repeat(save.stars[lv.n] || 0) + '☆'.repeat(3 - (save.stars[lv.n] || 0)), x + w / 2, y + 80);
+    window.__levelBtns.push({ x, y, w, h, n: lv.n, unlocked });
+  });
+  ctx.fillStyle = '#ffd23f'; roundRect(W / 2 - 110, 500, 220, 34, 10); ctx.fill();
+  ctx.fillStyle = '#333'; ctx.font = 'bold 16px Verdana'; ctx.fillText('← Back to Menu', W / 2, 522);
+  window.__backBtn = { x: W / 2 - 110, y: 500, w: 220, h: 34 };
+}
+
+/* ---------------- Menu / click handling ---------------- */
+function onPlayPressed() {
+  AudioSys.init(); AudioSys.resume();
+  // Ads ONLY here, on the PLAY button press — never on game load.
+  if (!GM.preRollShown) { GM.preRollShown = true; GM.showBanner(); }
+  state = 'loading'; loadingT = 0; loadingTarget = 'select';
+}
+canvas.addEventListener('click', e => {
+  const r = canvas.getBoundingClientRect();
+  const mx = (e.clientX - r.left) * (W / r.width), my = (e.clientY - r.top) * (H / r.height);
+  AudioSys.init(); AudioSys.resume();
+  if (state === 'menu' && window.__playBtn) {
+    const b = window.__playBtn;
+    if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) onPlayPressed();
+  } else if (state === 'select' && window.__levelBtns) {
+    for (const b of window.__levelBtns) {
+      if (b.unlocked && mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) { startLevel(b.n); return; }
+    }
+    const bb = window.__backBtn;
+    if (bb && mx >= bb.x && mx <= bb.x + bb.w && my >= bb.y && my <= bb.y + bb.h) state = 'menu';
+  } else if ((state === 'complete' || state === 'gameover' || state === 'victory') && endBtn) {
+    if (mx >= endBtn.x && mx <= endBtn.x + endBtn.w && my >= endBtn.y && my <= endBtn.y + endBtn.h) endBtn.onClick();
+    else state = 'select'; // click elsewhere on an end screen -> level select
+  }
+});
+
+/* ---------------- Main loop ---------------- */
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - lastT) / 1000); lastT = now;
+  if (state === 'loading') {
+    loadingT += dt;
+    if (loadingT >= 3) state = loadingTarget; // exactly 3 seconds of loading
+  }
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+updateMuteBtn();
+requestAnimationFrame(loop);
+
+/* ---------------- Test hooks (used by headless playtesting; harmless in play) ---------------- */
+window.__jungleRanger = {
+  get state() { return state; }, get levelNum() { return levelNum; },
+  get paused() { return paused; }, get save() { return JSON.parse(JSON.stringify(save)); },
+  get player() { return player ? { x: player.x, y: player.y, hearts: player.hearts, dead: player.dead } : null; },
+  get enemies() { return (enemies || []).map(e => ({ img: e.img, hp: e.hp, boss: !!e.boss, x: Math.round(e.x) })); },
+  get coins() { return { got: levelCoins, total: levelCoinsTotal }; },
+  get score() { return score; },
+  get imagesLoaded() { return imagesLoaded; }, get imagesFailed() { return imagesFailed.slice(); },
+  get ebullets() { return (ebullets || []).length; },
+  get gm() { return { available: GM.available, preRollShown: GM.preRollShown }; },
+  levels: LEVELS.map(l => ({ n: l.n, name: l.name, enemy: l.enemy, enemyName: ENEMY_NAMES[l.enemy], count: l.count, boss: l.boss, len: l.len })),
+  startLevel, completeLevel, onPlayPressed,
+  warpToFlag() { if (player) { player.x = flagX - player.w + 5; player.y = 400; } },
+  killBoss() { if (enemies) enemies.forEach(e => { if (e.boss) e.hp = 0; }); },
+  setHearts(n) { if (player) player.hearts = n; },
+  resetSave() { save = { unlocked: 1, stars: {}, coins: 0, score: 0, levelsDone: 0 }; persistSave(); },
+  goSelect() { state = 'select'; },
+};
+</script>
+</body>
+</html>
